@@ -71,24 +71,83 @@ Também é possível usar um modelo YOLO local:
 python detector_yolo.py foto.jpg --modelo weights/license_plate.pt --salvar-recortes
 ```
 
-Exemplo de retorno esperado:
+## Dataset público Roboflow para placas brasileiras
 
-```json
-[
-  {
-    "bbox": [310, 240, 505, 292],
-    "confianca_yolo": 0.94,
-    "modelo_detector": "https://huggingface.co/felipedutrain/placa-br-yolov11/resolve/main/best.pt",
-    "placa": "UEQ0F29",
-    "modelo": "MERCOSUL",
-    "valida": true,
-    "ocr_bruto": "UEQOF29",
-    "confianca_ocr": 0.91,
-    "motor_ocr": "easyocr",
-    "recorte": "recortes/placa_0_UEQ0F29.jpg"
-  }
-]
+Durante a validação, foi verificado que o projeto `placas-brasileiras/placas-0iqjy` do Roboflow é de **placas de trânsito**, não de placas veiculares. Ele não deve ser usado neste projeto.
+
+Para placas veiculares brasileiras, o projeto usa como opção pública principal:
+
+```text
+workspace: akler
+project: lpr-placas-brasileiras-2025-y4ydq
+version: 8
 ```
+
+Roboflow Universe:
+
+```text
+https://universe.roboflow.com/akler/lpr-placas-brasileiras-2025-y4ydq
+```
+
+Esse dataset possui classes `new` e `old`, correspondentes aos dois estilos de placas. Para o detector deste projeto, ambas são remapeadas para uma única classe:
+
+```text
+0 = license_plate
+```
+
+A distinção entre placa antiga e Mercosul continua sendo feita no OCR/validador.
+
+### Baixar e preparar automaticamente
+
+Configure sua API key do Roboflow:
+
+Linux/macOS:
+
+```bash
+export ROBOFLOW_API_KEY="SUA_CHAVE"
+```
+
+Windows PowerShell:
+
+```powershell
+$env:ROBOFLOW_API_KEY="SUA_CHAVE"
+```
+
+Depois execute:
+
+```bash
+python baixar_roboflow.py
+```
+
+O script baixa a versão padrão do dataset, copia os splits para o layout do projeto e converte todas as labels para `license_plate`.
+
+Estrutura final:
+
+```text
+dataset/
+  images/
+    train/
+    val/
+    test/
+  labels/
+    train/
+    val/
+    test/
+```
+
+O arquivo `dataset.yaml` já está configurado para esses três splits.
+
+## Benchmark com UFPR-ALPR
+
+O projeto também possui o script:
+
+```text
+converter_ufpr_yolo.py
+```
+
+Ele converte as anotações locais do UFPR-ALPR para o formato YOLO usando uma única classe `license_plate`.
+
+As imagens do UFPR-ALPR não devem ser adicionadas ou redistribuídas neste repositório; consulte os termos próprios do dataset.
 
 ## Regras de validação
 
@@ -106,78 +165,7 @@ AAA0A00
 ABC1D23
 ```
 
-O sistema também tenta corrigir confusões comuns de OCR de acordo com a posição esperada, como:
-
-- `O` / `0`
-- `I` / `1`
-- `Q` / `0`
-- `G` / `6`
-- `B` / `8`
-- `S` / `5`
-- `Z` / `2`
-
-## Benchmark com UFPR-ALPR
-
-O projeto agora possui o script:
-
-```text
-converter_ufpr_yolo.py
-```
-
-Ele converte as anotações locais do UFPR-ALPR para o formato YOLO usando uma única classe:
-
-```text
-license_plate
-```
-
-Exemplo:
-
-```bash
-python converter_ufpr_yolo.py \
-  --origem /caminho/UFPR-ALPR \
-  --destino dataset/ufpr_yolo
-```
-
-O conversor tenta preservar os conjuntos `train`, `validation` e `test` quando presentes e gera:
-
-```text
-dataset/ufpr_yolo/
-  images/
-    train/
-    val/
-    test/
-  labels/
-    train/
-    val/
-    test/
-  dataset_ufpr.yaml
-```
-
-**Importante:** as imagens do UFPR-ALPR não devem ser adicionadas ou redistribuídas neste repositório. O dataset possui termos próprios de uso para pesquisa acadêmica/não comercial. Este projeto mantém apenas o conversor. Veja `docs/UFPR_ALPR.md`.
-
-## Fine-tuning próprio
-
-Mesmo usando o modelo pré-treinado, podemos melhorar o desempenho com imagens próprias do ambiente operacional.
-
-A estrutura esperada é:
-
-```text
-dataset/
-  images/
-    train/
-    val/
-  labels/
-    train/
-    val/
-```
-
-A classe YOLO continua sendo apenas:
-
-```text
-license_plate
-```
-
-A distinção entre placa antiga e Mercosul é feita no OCR/validador.
+O sistema também tenta corrigir confusões comuns de OCR de acordo com a posição esperada, como `O/0`, `I/1`, `Q/0`, `G/6`, `B/8`, `S/5` e `Z/2`.
 
 ## Status
 
@@ -189,16 +177,18 @@ Já temos:
 - correção por máscara para placa antiga e Mercosul;
 - retorno de `bbox`, confiança YOLO, confiança OCR e motor OCR;
 - opção para salvar o recorte detectado;
-- conversor UFPR-ALPR -> YOLO para benchmark/fine-tuning local;
-- estrutura pronta para fine-tuning posterior;
+- importador de dataset público do Roboflow;
+- conversor UFPR-ALPR para benchmark local;
+- `dataset.yaml` com train/val/test;
+- estrutura pronta para fine-tuning;
 - caminho aberto para integração com Supabase.
 
 ## Próximas etapas
 
-- obter acesso autorizado ao UFPR-ALPR ou outro dataset compatível;
-- converter e validar visualmente as anotações;
+- baixar o dataset Roboflow autorizado;
+- validar visualmente uma amostra das anotações;
 - testar YOLO + EasyOCR em lote;
-- medir precisão do detector e OCR separadamente;
-- adicionar votação entre múltiplas leituras quando necessário;
+- medir precisão do detector e do OCR separadamente;
+- fazer fine-tuning se necessário;
 - processar vídeo/câmera em tempo real;
 - salvar eventos válidos no Supabase.
