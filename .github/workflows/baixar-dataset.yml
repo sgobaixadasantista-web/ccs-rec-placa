@@ -34,7 +34,7 @@ jobs:
       - name: Instalar dependencias de treino
         run: |
           python -m pip install --upgrade pip
-          pip install ultralytics
+          pip install ultralytics kagglehub
 
       - name: Baixar e preparar dataset publico
         run: python baixar_dataset_publico.py
@@ -73,26 +73,17 @@ jobs:
           from ultralytics import YOLO
 
           best = Path('runs/placas/weights/best.pt')
+          test_dir = Path('dataset/images/test')
           if not best.exists():
               raise SystemExit('best.pt nao foi gerado')
+          if not test_dir.exists() or not any(test_dir.iterdir()):
+              print('Split test vazio; validacao final ignorada.')
+              raise SystemExit(0)
 
           model = YOLO(str(best))
-          try:
-              metrics = model.val(data='dataset.yaml', split='test', imgsz=640, device='cpu', plots=True)
-              print(metrics)
-          except Exception as exc:
-              print(f'Validacao de test ignorada: {exc}')
+          metrics = model.val(data='dataset.yaml', split='test', imgsz=640, device='cpu', plots=True)
+          print(metrics)
           PY
-
-      - name: Empacotar dataset
-        run: zip -r dataset-publico.zip dataset
-
-      - name: Publicar dataset
-        uses: actions/upload-artifact@v4
-        with:
-          name: dataset-publico-mercosul
-          path: dataset-publico.zip
-          retention-days: 7
 
       - name: Publicar modelo treinado
         uses: actions/upload-artifact@v4
