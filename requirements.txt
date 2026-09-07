@@ -3,4 +3,3 @@ easyocr
 pytesseract
 ultralytics
 numpy
-roboflow
