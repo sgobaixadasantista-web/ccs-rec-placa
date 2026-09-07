@@ -6,7 +6,7 @@ on:
       epochs:
         description: 'Numero de epocas'
         required: false
-        default: '40'
+        default: '10'
       imgsz:
         description: 'Resolucao de treino'
         required: false
@@ -15,6 +15,10 @@ on:
         description: 'Batch size'
         required: false
         default: '16'
+      max_por_split:
+        description: '0=todas as imagens; use 1000 para teste rapido'
+        required: false
+        default: '1000'
 
 jobs:
   treinar:
@@ -34,10 +38,12 @@ jobs:
       - name: Instalar dependencias de treino
         run: |
           python -m pip install --upgrade pip
-          pip install ultralytics kagglehub
+          pip install ultralytics datasets pillow
 
-      - name: Baixar e preparar dataset publico
-        run: python baixar_dataset_publico.py
+      - name: Baixar e preparar dataset publico do Hugging Face
+        run: |
+          python baixar_dataset_publico.py \
+            --max-por-split ${{ inputs.max_por_split }}
 
       - name: Validar dataset
         run: |
