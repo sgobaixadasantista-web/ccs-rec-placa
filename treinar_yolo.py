@@ -19,6 +19,9 @@ def main():
     parser.add_argument("--name", default="placas")
     args = parser.parse_args()
 
+    projeto = Path(args.project).resolve()
+    projeto.mkdir(parents=True, exist_ok=True)
+
     modelo = YOLO(args.modelo)
     resultados = modelo.train(
         data=args.data,
@@ -26,7 +29,7 @@ def main():
         imgsz=args.imgsz,
         batch=args.batch,
         device=args.device,
-        project=args.project,
+        project=str(projeto),
         name=args.name,
         exist_ok=True,
         patience=12,
@@ -35,11 +38,15 @@ def main():
         plots=True,
     )
 
-    pasta = Path(args.project) / args.name
+    pasta = Path(resultados.save_dir).resolve()
     best = pasta / "weights" / "best.pt"
     last = pasta / "weights" / "last.pt"
 
+    if not best.exists():
+        raise FileNotFoundError(f"best.pt nao encontrado em {best}")
+
     print("Treinamento concluido.")
+    print(f"save_dir real: {pasta}")
     print(f"best.pt: {best}")
     print(f"last.pt: {last}")
     print(f"results: {pasta}")
