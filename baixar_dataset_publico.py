@@ -1,104 +1,141 @@
 import argparse
 import random
 import shutil
-import urllib.request
-import zipfile
 from pathlib import Path
 
-DATASET_URL = "https://prod-dcd-datasets-cache-zipfiles.s3.eu-west-1.amazonaws.com/nx9xbs4rgx-2.zip"
-VALID_EXT = {".jpg", ".jpeg", ".png", ".bmp"}
+import kagglehub
+
+DEFAULT_DATASET = "barkataliarbab/license-plate-detection-dataset-10125-images"
+VALID_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+SPLIT_ALIASES = {
+    "train": {"train", "training"},
+    "val": {"val", "valid", "validation"},
+    "test": {"test", "testing"},
+}
 
 
-def baixar(url: str, destino: Path):
-    destino.parent.mkdir(parents=True, exist_ok=True)
-    if destino.exists() and destino.stat().st_size > 0:
-        print(f"Download já existe: {destino}")
-        return
-    print(f"Baixando dataset público: {url}")
-    urllib.request.urlretrieve(url, destino)
-    print(f"Download concluído: {destino} ({destino.stat().st_size / 1024**2:.1f} MB)")
+def baixar(dataset: str) -> Path:
+    print(f"Baixando dataset publico via KaggleHub: {dataset}")
+    caminho = Path(kagglehub.dataset_download(dataset))
+    print(f"Dataset disponivel em: {caminho}")
+    return caminho
 
 
-def extrair(zip_path: Path, destino: Path):
-    marcador = destino / ".extraido"
-    if marcador.exists():
-        print("Dataset já extraído.")
-        return
-    destino.mkdir(parents=True, exist_ok=True)
-    print("Extraindo dataset...")
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(destino)
-    marcador.write_text("ok\n", encoding="utf-8")
-
-
-def localizar_pastas(raiz: Path):
-    dirs = [p for p in raiz.rglob("*") if p.is_dir()]
-    imagens = [p for p in dirs if p.name.lower() == "images"]
-    labels = [p for p in dirs if p.name.lower() == "labels"]
-
-    for img_dir in imagens:
-        for lbl_dir in labels:
-            if img_dir.parent == lbl_dir.parent:
-                return img_dir, lbl_dir
-
-    if imagens and labels:
-        return imagens[0], labels[0]
-    raise RuntimeError("Não foi possível localizar as pastas Images/Labels no dataset extraído.")
-
-
-def coletar_pares(images_dir: Path, labels_dir: Path):
-    pares = []
-    labels_por_stem = {p.stem: p for p in labels_dir.rglob("*.txt")}
-    for img in images_dir.rglob("*"):
-        if img.is_file() and img.suffix.lower() in VALID_EXT:
-            lbl = labels_por_stem.get(img.stem)
-            if lbl:
-                pares.append((img, lbl))
-    return pares
-
-
-def normalizar_label(origem: Path, destino: Path):
+def normalizar_label(origem: Path, destino: Path) -> bool:
     linhas = []
     for linha in origem.read_text(encoding="utf-8", errors="ignore").splitlines():
         partes = linha.strip().split()
         if len(partes) < 5:
             continue
-        partes[0] = "0"
-        linhas.append(" ".join(partes[:5]))
-    destino.write_text(("\n".join(linhas) + "\n") if linhas else "", encoding="utf-8")
+        try:
+            coords = [float(v) for v in partes[1:5]]
+        except ValueError:
+            continue
+        if not all(0.0 <= v <= 1.0 for v in coords):
+            continue
+        linhas.append("0 " + " ".join(partes[1:5]))
+
+    if not linhas:
+        return False
+
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    destino.write_text("\n".join(linhas) + "\n", encoding="utf-8")
+    return True
 
 
-def preparar(extract_root: Path, destino: Path, seed: int = 42):
-    images_dir, labels_dir = localizar_pastas(extract_root)
-    pares = coletar_pares(images_dir, labels_dir)
+def pares_em_raiz(raiz: Path):
+    labels = {}
+    for p in raiz.rglob("*.txt"):
+        if p.name.lower() in {"classes.txt", "license.txt"}:
+            continue
+        labels.setdefault(p.stem, p)
+
+    pares = []
+    for img in raiz.rglob("*"):
+        if not img.is_file() or img.suffix.lower() not in VALID_EXT:
+            continue
+        lbl = labels.get(img.stem)
+        if lbl:
+            pares.append((img, lbl))
+    return pares
+
+
+def detectar_split(path: Path):
+    partes = {p.lower() for p in path.parts}
+    for destino, aliases in SPLIT_ALIASES.items():
+        if partes & aliases:
+            return destino
+    return None
+
+
+def copiar_pares(itens, destino: Path, split: str):
+    img_dst = destino / "images" / split
+    lbl_dst = destino / "labels" / split
+    img_dst.mkdir(parents=True, exist_ok=True)
+    lbl_dst.mkdir(parents=True, exist_ok=True)
+
+    total = 0
+    usados = set()
+    for img, lbl in itens:
+        nome = img.name
+        if nome in usados or (img_dst / nome).exists():
+            nome = f"{img.parent.name}_{img.name}"
+        usados.add(nome)
+        stem = Path(nome).stem
+        if normalizar_label(lbl, lbl_dst / f"{stem}.txt"):
+            shutil.copy2(img, img_dst / nome)
+            total += 1
+    return total
+
+
+def preparar(raiz: Path, destino: Path, seed: int = 42):
+    pares = pares_em_raiz(raiz)
     if not pares:
-        raise RuntimeError("Nenhum par imagem/label encontrado.")
-
-    random.Random(seed).shuffle(pares)
-    n = len(pares)
-    n_train = int(n * 0.8)
-    n_val = int(n * 0.1)
-    splits = {
-        "train": pares[:n_train],
-        "val": pares[n_train:n_train + n_val],
-        "test": pares[n_train + n_val:],
-    }
+        raise RuntimeError(
+            "Nenhum par imagem/label YOLO encontrado no dataset baixado. "
+            "Verifique a estrutura publicada pelo provedor."
+        )
 
     if destino.exists():
         shutil.rmtree(destino)
 
-    for split, itens in splits.items():
-        img_dst = destino / "images" / split
-        lbl_dst = destino / "labels" / split
-        img_dst.mkdir(parents=True, exist_ok=True)
-        lbl_dst.mkdir(parents=True, exist_ok=True)
-        for img, lbl in itens:
-            shutil.copy2(img, img_dst / img.name)
-            normalizar_label(lbl, lbl_dst / f"{img.stem}.txt")
-        print(f"{split}: {len(itens)} imagens")
+    por_split = {"train": [], "val": [], "test": []}
+    sem_split = []
+    for img, lbl in pares:
+        split = detectar_split(img)
+        if split:
+            por_split[split].append((img, lbl))
+        else:
+            sem_split.append((img, lbl))
 
-    yaml = Path("dataset.yaml")
-    yaml.write_text(
+    tem_splits_validos = len(por_split["train"]) > 0 and len(por_split["val"]) > 0
+
+    if not tem_splits_validos:
+        todos = pares[:]
+        random.Random(seed).shuffle(todos)
+        n = len(todos)
+        n_train = int(n * 0.7)
+        n_val = int(n * 0.2)
+        por_split = {
+            "train": todos[:n_train],
+            "val": todos[n_train:n_train + n_val],
+            "test": todos[n_train + n_val:],
+        }
+    elif sem_split:
+        por_split["train"].extend(sem_split)
+
+    totais = {}
+    for split in ("train", "val", "test"):
+        totais[split] = copiar_pares(por_split[split], destino, split)
+        print(f"{split}: {totais[split]} imagens/labels validos")
+
+    if totais["train"] == 0 or totais["val"] == 0:
+        raise RuntimeError("Dataset preparado sem train/val validos.")
+
+    if totais["test"] == 0:
+        print("Aviso: split test vazio; a validacao final de test sera ignorada.")
+
+    Path("dataset.yaml").write_text(
         "path: dataset\n"
         "train: images/train\n"
         "val: images/val\n"
@@ -107,26 +144,22 @@ def preparar(extract_root: Path, destino: Path, seed: int = 42):
         "  0: license_plate\n",
         encoding="utf-8",
     )
+
     print(f"Dataset pronto em {destino.resolve()}")
     print("Classe final: 0 = license_plate")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Baixa e prepara o Artificial Mercosur License Plates sem Roboflow.")
-    parser.add_argument("--url", default=DATASET_URL)
-    parser.add_argument("--zip", default="data/raw/artificial-mercosur.zip")
-    parser.add_argument("--extract", default="data/raw/artificial-mercosur")
+    parser = argparse.ArgumentParser(
+        description="Baixa e prepara dataset publico de deteccao de placas sem Roboflow/API key."
+    )
+    parser.add_argument("--dataset", default=DEFAULT_DATASET)
     parser.add_argument("--destino", default="dataset")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    zip_path = Path(args.zip)
-    extract_root = Path(args.extract)
-    destino = Path(args.destino)
-
-    baixar(args.url, zip_path)
-    extrair(zip_path, extract_root)
-    preparar(extract_root, destino, args.seed)
+    raiz = baixar(args.dataset)
+    preparar(raiz, Path(args.destino), args.seed)
 
 
 if __name__ == "__main__":
