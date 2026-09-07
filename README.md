@@ -37,7 +37,7 @@ https://huggingface.co/felipedutrain/placa-br-yolov11/resolve/main/best.pt
 
 ## OCR
 
-O pipeline principal passou a usar **EasyOCR** em vez do Tesseract.
+O pipeline principal usa **EasyOCR**.
 
 São testadas várias versões do mesmo recorte:
 
@@ -116,6 +116,45 @@ O sistema também tenta corrigir confusões comuns de OCR de acordo com a posiç
 - `S` / `5`
 - `Z` / `2`
 
+## Benchmark com UFPR-ALPR
+
+O projeto agora possui o script:
+
+```text
+converter_ufpr_yolo.py
+```
+
+Ele converte as anotações locais do UFPR-ALPR para o formato YOLO usando uma única classe:
+
+```text
+license_plate
+```
+
+Exemplo:
+
+```bash
+python converter_ufpr_yolo.py \
+  --origem /caminho/UFPR-ALPR \
+  --destino dataset/ufpr_yolo
+```
+
+O conversor tenta preservar os conjuntos `train`, `validation` e `test` quando presentes e gera:
+
+```text
+dataset/ufpr_yolo/
+  images/
+    train/
+    val/
+    test/
+  labels/
+    train/
+    val/
+    test/
+  dataset_ufpr.yaml
+```
+
+**Importante:** as imagens do UFPR-ALPR não devem ser adicionadas ou redistribuídas neste repositório. O dataset possui termos próprios de uso para pesquisa acadêmica/não comercial. Este projeto mantém apenas o conversor. Veja `docs/UFPR_ALPR.md`.
+
 ## Fine-tuning próprio
 
 Mesmo usando o modelo pré-treinado, podemos melhorar o desempenho com imagens próprias do ambiente operacional.
@@ -150,12 +189,15 @@ Já temos:
 - correção por máscara para placa antiga e Mercosul;
 - retorno de `bbox`, confiança YOLO, confiança OCR e motor OCR;
 - opção para salvar o recorte detectado;
+- conversor UFPR-ALPR -> YOLO para benchmark/fine-tuning local;
 - estrutura pronta para fine-tuning posterior;
 - caminho aberto para integração com Supabase.
 
 ## Próximas etapas
 
-- testar YOLO + EasyOCR em imagens reais;
+- obter acesso autorizado ao UFPR-ALPR ou outro dataset compatível;
+- converter e validar visualmente as anotações;
+- testar YOLO + EasyOCR em lote;
 - medir precisão do detector e OCR separadamente;
 - adicionar votação entre múltiplas leituras quando necessário;
 - processar vídeo/câmera em tempo real;
