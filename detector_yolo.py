@@ -8,28 +8,20 @@ import numpy as np
 import pytesseract
 from ultralytics import YOLO
 
+MODELO_PADRAO = (
+    "https://huggingface.co/felipedutrain/placa-br-yolov11/resolve/main/best.pt"
+)
+
 PADRAO_ANTIGO = re.compile(r"^[A-Z]{3}[0-9]{4}$")
 PADRAO_MERCOSUL = re.compile(r"^[A-Z]{3}[0-9][A-Z][0-9]{2}$")
 
 CONFUSOES_NUM = {
-    "O": "0",
-    "Q": "0",
-    "D": "0",
-    "I": "1",
-    "L": "1",
-    "Z": "2",
-    "S": "5",
-    "B": "8",
-    "G": "6",
+    "O": "0", "Q": "0", "D": "0", "I": "1", "L": "1",
+    "Z": "2", "S": "5", "B": "8", "G": "6",
 }
 
 CONFUSOES_LETRA = {
-    "0": "O",
-    "1": "I",
-    "2": "Z",
-    "5": "S",
-    "8": "B",
-    "6": "G",
+    "0": "O", "1": "I", "2": "Z", "5": "S", "8": "B", "6": "G",
 }
 
 
@@ -120,7 +112,7 @@ def ocr_placa(crop):
     return leituras[0]
 
 
-def detectar(caminho_imagem, modelo_yolo, conf=0.25, salvar_recortes=False):
+def detectar(caminho_imagem, modelo_yolo=MODELO_PADRAO, conf=0.25, salvar_recortes=False):
     imagem = cv2.imread(caminho_imagem)
     if imagem is None:
         raise ValueError(f"Imagem não encontrada: {caminho_imagem}")
@@ -154,6 +146,7 @@ def detectar(caminho_imagem, modelo_yolo, conf=0.25, salvar_recortes=False):
             registro = {
                 "bbox": [x1, y1, x2, y2],
                 "confianca_yolo": round(conf_yolo, 4),
+                "modelo_detector": modelo_yolo,
                 **ocr,
             }
 
@@ -172,12 +165,12 @@ def detectar(caminho_imagem, modelo_yolo, conf=0.25, salvar_recortes=False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Detecção de placas com YOLO + OCR")
+    parser = argparse.ArgumentParser(description="Detecção de placas brasileiras com YOLOv11 + OCR")
     parser.add_argument("imagem", help="Caminho da imagem")
     parser.add_argument(
         "--modelo",
-        default="weights/license_plate.pt",
-        help="Pesos YOLO treinados para detectar placas",
+        default=MODELO_PADRAO,
+        help="URL ou caminho local para os pesos YOLO",
     )
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--salvar-recortes", action="store_true")
