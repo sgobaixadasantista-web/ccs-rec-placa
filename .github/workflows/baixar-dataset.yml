@@ -72,33 +72,43 @@ jobs:
             --project runs \
             --name placas
 
+      - name: Confirmar arquivos do treino
+        run: |
+          echo "Diretorio atual: $PWD"
+          find runs -maxdepth 4 -type f | sort
+          test -f runs/placas/weights/best.pt
+
       - name: Validar best.pt no conjunto de teste
         run: |
           python - <<'PY'
           from pathlib import Path
           from ultralytics import YOLO
 
-          best = Path('runs/placas/weights/best.pt')
+          best = Path('runs/placas/weights/best.pt').resolve()
           test_dir = Path('dataset/images/test')
           if not best.exists():
-              raise SystemExit('best.pt nao foi gerado')
+              raise SystemExit(f'best.pt nao encontrado em {best}')
           if not test_dir.exists() or not any(test_dir.iterdir()):
               print('Split test vazio; validacao final ignorada.')
               raise SystemExit(0)
 
+          print(f'Validando modelo: {best}')
           model = YOLO(str(best))
-          metrics = model.val(data='dataset.yaml', split='test', imgsz=640, device='cpu', plots=True)
-          print(metrics)
+          metrics = model.val(data='dataset.yaml', split='test', imgsz=${{ inputs.imgsz }}, device='cpu', plots=True, project='runs', name='teste_final', exist_ok=True)
+          print(metrics.results_dict)
           PY
 
       - name: Publicar modelo treinado
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: ccs-rec-placa-best-pt
           path: runs/placas/weights/best.pt
+          if-no-files-found: warn
           retention-days: 30
 
       - name: Publicar relatorios de treino
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: relatorios-treinamento
@@ -110,5 +120,6 @@ jobs:
             runs/placas/F1_curve.png
             runs/placas/P_curve.png
             runs/placas/R_curve.png
+            runs/teste_final/*.png
           if-no-files-found: ignore
           retention-days: 30
