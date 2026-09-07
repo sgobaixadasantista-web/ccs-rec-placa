@@ -3,3 +3,4 @@ easyocr
 pytesseract
 ultralytics
 numpy
+kagglehub
