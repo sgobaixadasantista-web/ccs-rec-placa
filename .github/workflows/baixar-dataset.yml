@@ -1,41 +1,129 @@
-name: Baixar dataset Roboflow
+name: Baixar dataset e treinar YOLO
 
 on:
   workflow_dispatch:
+    inputs:
+      epochs:
+        description: 'Numero de epocas'
+        required: false
+        default: '40'
+      imgsz:
+        description: 'Resolucao de treino'
+        required: false
+        default: '640'
+      batch:
+        description: 'Batch size'
+        required: false
+        default: '16'
 
 jobs:
-  baixar-dataset:
-    runs-on: ubuntu-latest
+  treinar:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Configurar Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
+          cache: 'pip'
 
-      - name: Instalar dependencias
-        run: pip install -r requirements.txt
+      - name: Instalar dependencias do pipeline de treino
+        run: |
+          python -m pip install --upgrade pip
+          pip install roboflow ultralytics
 
-      - name: Baixar dataset
+      - name: Verificar secret do Roboflow
+        env:
+          ROBOFLOW_API_KEY: ${{ secrets.ROBOFLOW_API_KEY }}
+        run: |
+          if [ -z "$ROBOFLOW_API_KEY" ]; then
+            echo "ROBOFLOW_API_KEY nao configurada em Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          echo "Secret Roboflow encontrado."
+
+      - name: Baixar e preparar dataset
         env:
           ROBOFLOW_API_KEY: ${{ secrets.ROBOFLOW_API_KEY }}
         run: python baixar_roboflow.py
 
-      - name: Empacotar dataset
+      - name: Validar dataset
         run: |
-          if [ -d dataset ]; then
-            zip -r dataset-roboflow.zip dataset
-          else
-            echo "Pasta dataset nao encontrada"
-            exit 1
-          fi
+          python - <<'PY'
+          from pathlib import Path
 
-      - name: Publicar artifact
+          for split in ['train', 'val', 'test']:
+              imgs = Path('dataset/images') / split
+              lbls = Path('dataset/labels') / split
+              n_img = len([p for p in imgs.glob('*') if p.is_file()]) if imgs.exists() else 0
+              n_lbl = len(list(lbls.glob('*.txt'))) if lbls.exists() else 0
+              print(f'{split}: {n_img} imagens / {n_lbl} labels')
+              if split in ('train', 'val') and (n_img == 0 or n_lbl == 0):
+                  raise SystemExit(f'Split obrigatorio vazio: {split}')
+          PY
+
+      - name: Treinar YOLO11n
+        run: |
+          python treinar_yolo.py \
+            --data dataset.yaml \
+            --modelo yolo11n.pt \
+            --epochs ${{ inputs.epochs }} \
+            --imgsz ${{ inputs.imgsz }} \
+            --batch ${{ inputs.batch }} \
+            --device cpu \
+            --project runs \
+            --name placas
+
+      - name: Validar best.pt no conjunto de teste
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from ultralytics import YOLO
+
+          best = Path('runs/placas/weights/best.pt')
+          if not best.exists():
+              raise SystemExit('best.pt nao foi gerado')
+
+          model = YOLO(str(best))
+          try:
+              metrics = model.val(data='dataset.yaml', split='test', imgsz=640, device='cpu', plots=True)
+              print(metrics)
+          except Exception as exc:
+              print(f'Validacao de test ignorada: {exc}')
+          PY
+
+      - name: Empacotar dataset
+        run: zip -r dataset-roboflow.zip dataset
+
+      - name: Publicar dataset
         uses: actions/upload-artifact@v4
         with:
           name: dataset-roboflow
           path: dataset-roboflow.zip
           retention-days: 7
+
+      - name: Publicar modelo treinado
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccs-rec-placa-best-pt
+          path: runs/placas/weights/best.pt
+          retention-days: 30
+
+      - name: Publicar relatorios de treino
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorios-treinamento
+          path: |
+            runs/placas/results.csv
+            runs/placas/results.png
+            runs/placas/confusion_matrix*.png
+            runs/placas/PR_curve.png
+            runs/placas/F1_curve.png
+            runs/placas/P_curve.png
+            runs/placas/R_curve.png
+          if-no-files-found: ignore
+          retention-days: 30
