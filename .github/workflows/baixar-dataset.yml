@@ -1,0 +1,41 @@
+name: Baixar dataset Roboflow
+
+on:
+  workflow_dispatch:
+
+jobs:
+  baixar-dataset:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Baixar dataset
+        env:
+          ROBOFLOW_API_KEY: ${{ secrets.ROBOFLOW_API_KEY }}
+        run: python baixar_roboflow.py
+
+      - name: Empacotar dataset
+        run: |
+          if [ -d dataset ]; then
+            zip -r dataset-roboflow.zip dataset
+          else
+            echo "Pasta dataset nao encontrada"
+            exit 1
+          fi
+
+      - name: Publicar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dataset-roboflow
+          path: dataset-roboflow.zip
+          retention-days: 7
