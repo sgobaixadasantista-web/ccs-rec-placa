@@ -4,8 +4,7 @@ import re
 from pathlib import Path
 
 import cv2
-import numpy as np
-import pytesseract
+import easyocr
 from ultralytics import YOLO
 
 MODELO_PADRAO = (
@@ -14,6 +13,7 @@ MODELO_PADRAO = (
 
 PADRAO_ANTIGO = re.compile(r"^[A-Z]{3}[0-9]{4}$")
 PADRAO_MERCOSUL = re.compile(r"^[A-Z]{3}[0-9][A-Z][0-9]{2}$")
+ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 CONFUSOES_NUM = {
     "O": "0", "Q": "0", "D": "0", "I": "1", "L": "1",
@@ -23,6 +23,16 @@ CONFUSOES_NUM = {
 CONFUSOES_LETRA = {
     "0": "O", "1": "I", "2": "Z", "5": "S", "8": "B", "6": "G",
 }
+
+_READER = None
+
+
+def obter_reader():
+    global _READER
+    if _READER is None:
+        # gpu=False para funcionar em qualquer máquina. Depois podemos habilitar CUDA.
+        _READER = easyocr.Reader(["en"], gpu=False)
+    return _READER
 
 
 def limpar(texto: str) -> str:
@@ -62,54 +72,87 @@ def preprocessamentos(crop):
     maior = cv2.resize(crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
     gray = cv2.cvtColor(maior, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
-    otsu = cv2.threshold(clahe, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    otsu = cv2.threshold(
+        clahe, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )[1]
     adapt = cv2.adaptiveThreshold(
-        clahe, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 31, 9
+        clahe,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        9,
     )
-    return [gray, clahe, otsu, adapt]
+    return [maior, gray, clahe, otsu, adapt]
+
+
+def ler_easyocr(img):
+    reader = obter_reader()
+    resultados = reader.readtext(
+        img,
+        detail=1,
+        paragraph=False,
+        allowlist=ALLOWLIST,
+        decoder="beamsearch",
+        text_threshold=0.45,
+        low_text=0.25,
+        link_threshold=0.25,
+    )
+
+    if not resultados:
+        return "", 0.0
+
+    # Caso o OCR divida a placa em mais de um bloco, junta da esquerda para a direita.
+    resultados = sorted(
+        resultados,
+        key=lambda r: min(p[0] for p in r[0]),
+    )
+
+    partes = []
+    confs = []
+    for _, texto, confianca in resultados:
+        texto = limpar(texto)
+        if texto:
+            partes.append(texto)
+            confs.append(float(confianca))
+
+    bruto = "".join(partes)
+    confianca = sum(confs) / len(confs) if confs else 0.0
+    return bruto, confianca
 
 
 def ocr_placa(crop):
-    config = "--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     leituras = []
 
     for img in preprocessamentos(crop):
-        dados = pytesseract.image_to_data(
-            img,
-            config=config,
-            output_type=pytesseract.Output.DICT,
-        )
-
-        partes = []
-        confs = []
-        for txt, conf in zip(dados["text"], dados["conf"]):
-            t = limpar(txt)
-            try:
-                c = float(conf)
-            except (TypeError, ValueError):
-                c = -1
-            if t:
-                partes.append(t)
-                if c >= 0:
-                    confs.append(c)
-
-        bruto = "".join(partes)
+        bruto, confianca = ler_easyocr(img)
         placa, modelo, valida = classificar_e_corrigir(bruto)
-        confianca = float(np.mean(confs) / 100.0) if confs else 0.0
         leituras.append({
             "placa": placa,
             "modelo": modelo,
             "valida": valida,
             "ocr_bruto": bruto,
             "confianca_ocr": round(confianca, 4),
+            "motor_ocr": "easyocr",
         })
 
     leituras.sort(
-        key=lambda x: (x["valida"], x["confianca_ocr"]),
+        key=lambda x: (
+            x["valida"],
+            len(x["placa"]) == 7,
+            x["confianca_ocr"],
+        ),
         reverse=True,
     )
-    return leituras[0]
+
+    return leituras[0] if leituras else {
+        "placa": "",
+        "modelo": None,
+        "valida": False,
+        "ocr_bruto": "",
+        "confianca_ocr": 0.0,
+        "motor_ocr": "easyocr",
+    }
 
 
 def detectar(caminho_imagem, modelo_yolo=MODELO_PADRAO, conf=0.25, salvar_recortes=False):
@@ -158,14 +201,20 @@ def detectar(caminho_imagem, modelo_yolo=MODELO_PADRAO, conf=0.25, salvar_recort
             saida.append(registro)
 
     saida.sort(
-        key=lambda x: (x["valida"], x["confianca_yolo"], x["confianca_ocr"]),
+        key=lambda x: (
+            x["valida"],
+            x["confianca_yolo"],
+            x["confianca_ocr"],
+        ),
         reverse=True,
     )
     return saida
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Detecção de placas brasileiras com YOLOv11 + OCR")
+    parser = argparse.ArgumentParser(
+        description="Detecção de placas brasileiras com YOLOv11 + EasyOCR"
+    )
     parser.add_argument("imagem", help="Caminho da imagem")
     parser.add_argument(
         "--modelo",
