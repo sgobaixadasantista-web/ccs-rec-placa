@@ -1,0 +1,120 @@
+name: Testar reconhecimento de placa
+
+on:
+  workflow_dispatch:
+    inputs:
+      imagem_url:
+        description: 'URL publica da imagem (opcional se usar imagem_path)'
+        required: false
+        default: ''
+      imagem_path:
+        description: 'Caminho da imagem dentro do repositorio (opcional)'
+        required: false
+        default: ''
+      conf:
+        description: 'Confianca minima do detector YOLO'
+        required: false
+        default: '0.25'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  testar:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install ultralytics easyocr opencv-python-headless numpy
+
+      - name: Baixar ultimo best.pt publicado
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p modelo
+          RUN_ID=$(gh run list \
+            --workflow baixar-dataset.yml \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')
+
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "Nenhum workflow de treino concluido com sucesso foi encontrado."
+            exit 1
+          fi
+
+          echo "Usando modelo do run: $RUN_ID"
+          gh run download "$RUN_ID" \
+            --name ccs-rec-placa-best-pt \
+            --dir modelo
+
+          find modelo -maxdepth 3 -type f -print
+          test -f modelo/best.pt
+
+      - name: Preparar imagem de teste
+        env:
+          IMAGEM_URL: ${{ inputs.imagem_url }}
+          IMAGEM_PATH: ${{ inputs.imagem_path }}
+        run: |
+          mkdir -p entrada
+
+          if [ -n "$IMAGEM_URL" ]; then
+            echo "Baixando imagem pela URL informada..."
+            curl -L --fail --retry 3 --connect-timeout 20 "$IMAGEM_URL" -o entrada/imagem_teste
+            echo "entrada/imagem_teste" > entrada/caminho.txt
+          elif [ -n "$IMAGEM_PATH" ]; then
+            if [ ! -f "$IMAGEM_PATH" ]; then
+              echo "Arquivo nao encontrado no repositorio: $IMAGEM_PATH"
+              exit 1
+            fi
+            cp "$IMAGEM_PATH" entrada/imagem_teste
+            echo "entrada/imagem_teste" > entrada/caminho.txt
+          else
+            echo "Informe imagem_url ou imagem_path ao executar o workflow."
+            exit 1
+          fi
+
+          file entrada/imagem_teste || true
+
+      - name: Rodar detector e OCR
+        run: |
+          IMAGEM=$(cat entrada/caminho.txt)
+          python testar_reconhecimento.py "$IMAGEM" \
+            --modelo modelo/best.pt \
+            --conf ${{ inputs.conf }} \
+            --saida resultado_teste
+
+      - name: Mostrar resumo
+        if: ${{ always() }}
+        run: |
+          echo '===== RESULTADO ====='
+          if [ -f resultado_teste/resumo.txt ]; then
+            cat resultado_teste/resumo.txt
+          else
+            echo 'Resumo nao gerado.'
+          fi
+
+      - name: Publicar resultado do teste
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultado-reconhecimento-placa
+          path: |
+            resultado_teste/
+            recortes/
+          if-no-files-found: warn
+          retention-days: 14
