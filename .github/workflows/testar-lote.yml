@@ -10,6 +10,8 @@ on:
   push:
     paths:
       - 'imagens_teste/**'
+      - 'benchmark_placas.csv'
+      - 'avaliar_benchmark.py'
       - '.github/workflows/testar-lote.yml'
       - 'detector_yolo.py'
       - 'testar_reconhecimento.py'
@@ -91,6 +93,15 @@ jobs:
             python -c "import json,sys; nome=sys.argv[1]; dados=json.load(open(sys.argv[2],encoding='utf-8')); melhor=dados[0] if dados else {}; campos=[nome,str(melhor.get('placa','')),str(melhor.get('valida',False)),str(melhor.get('modelo','')),str(melhor.get('confianca_yolo','')),str(melhor.get('confianca_ocr','')),str(len(dados))]; print(','.join(x.replace(',',' ') for x in campos))" "$nome" "$saida/resultado.json" >> resultado_lote/resumo.csv
           done
 
+      - name: Avaliar benchmark
+        if: ${{ always() }}
+        run: |
+          if [ -f resultado_lote/resumo.csv ] && [ -f benchmark_placas.csv ]; then
+            python avaliar_benchmark.py benchmark_placas.csv resultado_lote/resumo.csv
+          else
+            echo 'Benchmark nao executado: resumo ou gabarito ausente.'
+          fi
+
       - name: Mostrar resumo do lote
         if: ${{ always() }}
         run: |
@@ -99,6 +110,13 @@ jobs:
             cat resultado_lote/resumo.csv
           else
             echo 'Resumo nao gerado.'
+          fi
+          echo
+          echo '===== RESULTADO DO BENCHMARK ====='
+          if [ -f resultado_lote/benchmark_resumo.txt ]; then
+            cat resultado_lote/benchmark_resumo.txt
+          else
+            echo 'Benchmark nao gerado.'
           fi
 
       - name: Publicar resultados do lote
