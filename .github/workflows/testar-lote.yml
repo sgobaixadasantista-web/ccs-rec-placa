@@ -14,7 +14,8 @@ on:
       - 'avaliar_benchmark.py'
       - '.github/workflows/testar-lote.yml'
       - 'detector_yolo.py'
-      - 'testar_reconhecimento.py'
+      - 'detector_yolo_v2.py'
+      - 'testar_reconhecimento_v2.py'
 
 permissions:
   contents: read
@@ -64,7 +65,7 @@ jobs:
 
           test -f modelo/best.pt
 
-      - name: Testar todas as imagens
+      - name: Testar todas as imagens - rodada 2
         env:
           CONF: ${{ inputs.conf || '0.25' }}
         run: |
@@ -85,7 +86,7 @@ jobs:
             saida="resultado_lote/$base"
             echo "===== TESTANDO $nome ====="
 
-            python testar_reconhecimento.py "$img" \
+            python testar_reconhecimento_v2.py "$img" \
               --modelo modelo/best.pt \
               --conf "$CONF" \
               --saida "$saida"
