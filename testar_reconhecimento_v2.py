@@ -4,7 +4,7 @@ from pathlib import Path
 
 import cv2
 
-from detector_yolo_v2 import detectar
+from detector_yolo_v3 import detectar
 
 
 def desenhar_resultado(imagem_path: str, resultados: list[dict], destino: Path) -> None:
@@ -38,7 +38,7 @@ def desenhar_resultado(imagem_path: str, resultados: list[dict], destino: Path) 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Rodada 2: OCR multi-recorte + ranking conjunto")
+    parser = argparse.ArgumentParser(description="OCR multi-recorte + consenso entre deteccoes")
     parser.add_argument("imagem")
     parser.add_argument("--modelo", required=True)
     parser.add_argument("--conf", type=float, default=0.25)
@@ -64,7 +64,9 @@ def main() -> None:
             f"confianca_ocr={melhor.get('confianca_ocr', 0)}\n"
             f"ocr_bruto={melhor.get('ocr_bruto', '')}\n"
             f"variante_crop={melhor.get('variante_crop', '')}\n"
-            f"score_selecao_v2={melhor.get('score_selecao_v2', '')}\n"
+            f"tipo_deteccao={melhor.get('tipo_deteccao', '')}\n"
+            f"acordo_medio={melhor.get('acordo_medio', '')}\n"
+            f"score_selecao_v3={melhor.get('score_selecao_v3', melhor.get('score_selecao_v2', ''))}\n"
             f"deteccoes={len(resultados)}\n"
         )
     else:
