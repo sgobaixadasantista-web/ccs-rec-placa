@@ -1,0 +1,132 @@
+name: Testar lote de imagens
+
+on:
+  workflow_dispatch:
+    inputs:
+      conf:
+        description: 'Confianca minima do detector YOLO'
+        required: false
+        default: '0.25'
+  push:
+    paths:
+      - 'imagens_teste/**'
+      - '.github/workflows/testar-lote.yml'
+      - 'detector_yolo.py'
+      - 'testar_reconhecimento.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  testar-lote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install ultralytics easyocr opencv-python-headless numpy
+
+      - name: Baixar ultimo best.pt publicado
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p modelo
+          RUN_ID=$(gh run list \
+            --workflow baixar-dataset.yml \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')
+
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "Nenhum workflow de treino concluido com sucesso foi encontrado."
+            exit 1
+          fi
+
+          echo "Usando modelo do run: $RUN_ID"
+          gh run download "$RUN_ID" \
+            --name ccs-rec-placa-best-pt \
+            --dir modelo
+
+          test -f modelo/best.pt
+
+      - name: Testar todas as imagens
+        env:
+          CONF: ${{ inputs.conf || '0.25' }}
+        run: |
+          mkdir -p resultado_lote
+          echo 'arquivo,placa,valida,modelo_placa,confianca_yolo,confianca_ocr,deteccoes' > resultado_lote/resumo.csv
+
+          shopt -s nullglob
+          imagens=(imagens_teste/*.jpg imagens_teste/*.jpeg imagens_teste/*.png imagens_teste/*.webp)
+
+          if [ ${#imagens[@]} -eq 0 ]; then
+            echo "Nenhuma imagem encontrada em imagens_teste/."
+            exit 1
+          fi
+
+          for img in "${imagens[@]}"; do
+            nome=$(basename "$img")
+            base="${nome%.*}"
+            saida="resultado_lote/$base"
+            echo "===== TESTANDO $nome ====="
+
+            python testar_reconhecimento.py "$img" \
+              --modelo modelo/best.pt \
+              --conf "$CONF" \
+              --saida "$saida"
+
+            python - "$nome" "$saida/resultado.json" >> resultado_lote/resumo.csv <<'PY'
+import json
+import sys
+
+nome, caminho = sys.argv[1], sys.argv[2]
+with open(caminho, encoding='utf-8') as f:
+    dados = json.load(f)
+
+melhor = dados[0] if dados else {}
+campos = [
+    nome,
+    str(melhor.get('placa', '')),
+    str(melhor.get('valida', False)),
+    str(melhor.get('modelo', '')),
+    str(melhor.get('confianca_yolo', '')),
+    str(melhor.get('confianca_ocr', '')),
+    str(len(dados)),
+]
+print(','.join(x.replace(',', ' ') for x in campos))
+PY
+          done
+
+      - name: Mostrar resumo do lote
+        if: ${{ always() }}
+        run: |
+          echo '===== RESULTADO DO LOTE ====='
+          if [ -f resultado_lote/resumo.csv ]; then
+            cat resultado_lote/resumo.csv
+          else
+            echo 'Resumo nao gerado.'
+          fi
+
+      - name: Publicar resultados do lote
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultado-lote-placas
+          path: |
+            resultado_lote/
+            recortes/
+          if-no-files-found: warn
+          retention-days: 14
