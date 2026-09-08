@@ -88,26 +88,7 @@ jobs:
               --conf "$CONF" \
               --saida "$saida"
 
-            python - "$nome" "$saida/resultado.json" >> resultado_lote/resumo.csv <<'PY'
-import json
-import sys
-
-nome, caminho = sys.argv[1], sys.argv[2]
-with open(caminho, encoding='utf-8') as f:
-    dados = json.load(f)
-
-melhor = dados[0] if dados else {}
-campos = [
-    nome,
-    str(melhor.get('placa', '')),
-    str(melhor.get('valida', False)),
-    str(melhor.get('modelo', '')),
-    str(melhor.get('confianca_yolo', '')),
-    str(melhor.get('confianca_ocr', '')),
-    str(len(dados)),
-]
-print(','.join(x.replace(',', ' ') for x in campos))
-PY
+            python -c "import json,sys; nome=sys.argv[1]; dados=json.load(open(sys.argv[2],encoding='utf-8')); melhor=dados[0] if dados else {}; campos=[nome,str(melhor.get('placa','')),str(melhor.get('valida',False)),str(melhor.get('modelo','')),str(melhor.get('confianca_yolo','')),str(melhor.get('confianca_ocr','')),str(len(dados))]; print(','.join(x.replace(',',' ') for x in campos))" "$nome" "$saida/resultado.json" >> resultado_lote/resumo.csv
           done
 
       - name: Mostrar resumo do lote
