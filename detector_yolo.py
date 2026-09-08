@@ -100,19 +100,45 @@ def candidatos_por_mascara(texto: str, mascara: str, modelo: str):
     return saida
 
 
+def _janelas_placa(texto: str):
+    """Gera trechos de 7 caracteres para ignorar texto extra capturado pelo OCR."""
+    texto = limpar(texto)
+    if len(texto) < 7:
+        return []
+    if len(texto) == 7:
+        return [(texto, 0)]
+    return [(texto[i:i + 7], i) for i in range(len(texto) - 6)]
+
+
 def gerar_candidatos_validos(texto: str):
     texto = limpar(texto)
-    if len(texto) != 7:
+    if len(texto) < 7:
         return []
 
-    candidatos = []
-    candidatos.extend(candidatos_por_mascara(texto, "LLLNNNN", "ANTIGA"))
-    candidatos.extend(candidatos_por_mascara(texto, "LLLNLNN", "MERCOSUL"))
+    # O EasyOCR pode concatenar a placa com adesivos, marca do veiculo ou outros
+    # caracteres do recorte. Em vez de rejeitar toda a leitura quando ela tem
+    # mais de 7 caracteres, avaliamos cada janela de 7 separadamente.
+    melhores = {}
+    for janela, offset in _janelas_placa(texto):
+        candidatos = []
+        candidatos.extend(candidatos_por_mascara(janela, "LLLNNNN", "ANTIGA"))
+        candidatos.extend(candidatos_por_mascara(janela, "LLLNLNN", "MERCOSUL"))
 
-    # Primeiro: menor custo de correcao. Em empate, o consenso entre os varios
-    # preprocessamentos sera aplicado em ocr_placa().
-    candidatos.sort(key=lambda x: x["correcoes"])
-    return candidatos
+        for cand in candidatos:
+            # Pequena penalidade apenas para desempatar janelas igualmente boas.
+            # O custo principal continua sendo o numero/probabilidade das correcoes.
+            cand = dict(cand)
+            cand["janela_ocr"] = janela
+            cand["offset_ocr"] = offset
+            cand["custo_ranking"] = round(cand["correcoes"] + offset * 0.01, 3)
+            chave = (cand["placa"], cand["modelo"])
+            anterior = melhores.get(chave)
+            if anterior is None or cand["custo_ranking"] < anterior["custo_ranking"]:
+                melhores[chave] = cand
+
+    saida = list(melhores.values())
+    saida.sort(key=lambda x: (x["custo_ranking"], x["correcoes"], x["offset_ocr"]))
+    return saida
 
 
 def classificar_e_corrigir(texto: str):
@@ -183,8 +209,10 @@ def ocr_placa(crop):
         "soma_conf": 0.0,
         "melhor_conf": 0.0,
         "menor_custo": 99.0,
+        "menor_custo_ranking": 99.0,
         "modelo": None,
         "ocr_brutos": [],
+        "janelas_ocr": [],
     })
 
     for img in preprocessamentos(crop):
@@ -202,8 +230,12 @@ def ocr_placa(crop):
             agg["soma_conf"] += confianca
             agg["melhor_conf"] = max(agg["melhor_conf"], confianca)
             agg["menor_custo"] = min(agg["menor_custo"], cand["correcoes"])
+            agg["menor_custo_ranking"] = min(
+                agg["menor_custo_ranking"], cand["custo_ranking"]
+            )
             agg["modelo"] = cand["modelo"]
             agg["ocr_brutos"].append(bruto)
+            agg["janelas_ocr"].append(cand["janela_ocr"])
 
     if agregados:
         ranking = []
@@ -215,8 +247,10 @@ def ocr_placa(crop):
                 "valida": True,
                 "confianca_ocr": round(media_conf, 4),
                 "correcoes": round(agg["menor_custo"], 3),
+                "custo_ranking": round(agg["menor_custo_ranking"], 3),
                 "suporte_ocr": agg["suporte"],
                 "melhor_confianca_ocr": round(agg["melhor_conf"], 4),
+                "janela_ocr": agg["janelas_ocr"][0] if agg["janelas_ocr"] else "",
                 "ocr_bruto": max(
                     agg["ocr_brutos"],
                     key=lambda bruto: max(
@@ -231,7 +265,7 @@ def ocr_placa(crop):
         ranking.sort(
             key=lambda x: (
                 x["suporte_ocr"],
-                -x["correcoes"],
+                -x["custo_ranking"],
                 x["confianca_ocr"],
                 x["melhor_confianca_ocr"],
             ),
