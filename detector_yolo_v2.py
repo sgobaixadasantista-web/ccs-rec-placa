@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from pathlib import Path
 
 import detector_yolo as base
 
@@ -164,18 +165,117 @@ def ocr_placa_v2(crop):
     return melhor
 
 
+def _intersecao_sobre_menor(a, b):
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+    inter = iw * ih
+    area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
+    area_b = max(1, (bx2 - bx1) * (by2 - by1))
+    return inter / min(area_a, area_b)
+
+
+def _agrupar_sobrepostas(resultados):
+    grupos = []
+    usados = set()
+    for i, item in enumerate(resultados):
+        if i in usados:
+            continue
+        grupo = [i]
+        usados.add(i)
+        mudou = True
+        while mudou:
+            mudou = False
+            for j, outro in enumerate(resultados):
+                if j in usados:
+                    continue
+                if any(
+                    _intersecao_sobre_menor(resultados[k]["bbox"], outro["bbox"]) >= 0.55
+                    for k in grupo
+                ):
+                    grupo.append(j)
+                    usados.add(j)
+                    mudou = True
+        if len(grupo) >= 2:
+            grupos.append(grupo)
+    return grupos
+
+
+def _criar_fusoes(caminho_imagem, resultados, salvar_recortes=False):
+    imagem = cv2.imread(caminho_imagem)
+    if imagem is None:
+        return []
+    h, w = imagem.shape[:2]
+    saida = []
+
+    for numero, grupo in enumerate(_agrupar_sobrepostas(resultados)):
+        itens = [resultados[i] for i in grupo]
+        x1 = min(i["bbox"][0] for i in itens)
+        y1 = min(i["bbox"][1] for i in itens)
+        x2 = max(i["bbox"][2] for i in itens)
+        y2 = max(i["bbox"][3] for i in itens)
+
+        # A fusao recupera partes da placa que deteccoes individuais podem cortar.
+        # Pequeno padding ajuda especialmente em imagens inclinadas.
+        bw, bh = x2 - x1, y2 - y1
+        px, py = int(bw * 0.04), int(bh * 0.06)
+        fx1, fy1 = max(0, x1 - px), max(0, y1 - py)
+        fx2, fy2 = min(w, x2 + px), min(h, y2 + py)
+        crop = imagem[fy1:fy2, fx1:fx2]
+        if crop.size == 0:
+            continue
+
+        ocr = ocr_placa_v2(crop)
+        confs = [float(i.get("confianca_yolo", 0.0)) for i in itens]
+        registro = {
+            "bbox": [fx1, fy1, fx2, fy2],
+            "confianca_yolo": round(max(confs) if confs else 0.0, 4),
+            "modelo_detector": itens[0].get("modelo_detector"),
+            "tipo_deteccao": "fusao_sobrepostas",
+            "deteccoes_fundidas": len(itens),
+            "bboxes_origem": [i["bbox"] for i in itens],
+            **ocr,
+        }
+
+        if salvar_recortes:
+            pasta = Path("recortes")
+            pasta.mkdir(exist_ok=True)
+            destino = pasta / f"fusao_{numero}_{ocr.get('placa') or 'sem_leitura'}.jpg"
+            cv2.imwrite(str(destino), crop)
+            registro["recorte"] = str(destino)
+
+        saida.append(registro)
+    return saida
+
+
+def _bonus_geometria(item):
+    x1, y1, x2, y2 = item.get("bbox", [0, 0, 1, 1])
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
+    proporcao = bw / bh
+    # Placas vistas em perspectiva variam bastante; bonus suave para evitar
+    # que a geometria sobreponha uma leitura OCR claramente melhor.
+    distancia = abs(proporcao - 2.8)
+    return max(-3.0, 3.0 - distancia * 1.5)
+
+
 def _score_deteccao(item):
     valida = 1 if item.get("valida", False) else 0
     correcoes = float(item.get("correcoes", 99.0))
     conf_ocr = float(item.get("confianca_ocr", 0.0))
     conf_yolo = float(item.get("confianca_yolo", 0.0))
     suporte = min(int(item.get("suporte_ocr", 0)), 5)
+    fusao = 1 if item.get("tipo_deteccao") == "fusao_sobrepostas" else 0
     return (
         valida * 100.0
         - correcoes * 8.0
         + conf_ocr * 30.0
         + conf_yolo * 24.0
         + suporte * 1.5
+        + _bonus_geometria(item)
+        + fusao * 1.5
     )
 
 
@@ -191,6 +291,11 @@ def detectar(caminho_imagem, modelo_yolo=base.MODELO_PADRAO, conf=0.25, salvar_r
         )
     finally:
         base.ocr_placa = original
+
+    # Nova rodada: se o YOLO gerar varias caixas sobre a mesma placa, criamos
+    # tambem um recorte unificado e o submetemos ao OCR. Isso evita escolher
+    # entre caixas que capturaram somente partes diferentes da mesma placa.
+    resultados.extend(_criar_fusoes(caminho_imagem, resultados, salvar_recortes))
 
     for item in resultados:
         item["score_selecao_v2"] = round(_score_deteccao(item), 4)
