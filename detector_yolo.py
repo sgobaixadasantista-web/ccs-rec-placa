@@ -1,6 +1,7 @@
 import argparse
 import json
 import re
+from collections import defaultdict
 from pathlib import Path
 
 import cv2
@@ -15,13 +16,27 @@ PADRAO_ANTIGO = re.compile(r"^[A-Z]{3}[0-9]{4}$")
 PADRAO_MERCOSUL = re.compile(r"^[A-Z]{3}[0-9][A-Z][0-9]{2}$")
 ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
+# Cada item pode ter mais de uma alternativa plausível. O desempate final usa
+# custo de correção + consenso entre os vários preprocessamentos do OCR.
 CONFUSOES_NUM = {
-    "O": "0", "Q": "0", "D": "0", "I": "1", "L": "1",
-    "Z": "2", "S": "5", "B": "8", "G": "6",
+    "O": ("0",),
+    "Q": ("0",),
+    "D": ("0",),
+    "I": ("1",),
+    "L": ("1",),
+    "Z": ("2", "7"),
+    "S": ("5",),
+    "B": ("8",),
+    "G": ("6",),
 }
 
 CONFUSOES_LETRA = {
-    "0": "O", "1": "I", "2": "Z", "5": "S", "8": "B", "6": "G",
+    "0": ("O",),
+    "1": ("I",),
+    "2": ("Z",),
+    "5": ("S",),
+    "8": ("B",),
+    "6": ("G",),
 }
 
 _READER = None
@@ -30,7 +45,6 @@ _READER = None
 def obter_reader():
     global _READER
     if _READER is None:
-        # gpu=False para funcionar em qualquer máquina. Depois podemos habilitar CUDA.
         _READER = easyocr.Reader(["en"], gpu=False)
     return _READER
 
@@ -39,33 +53,73 @@ def limpar(texto: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", texto.upper())
 
 
-def corrigir_por_mascara(texto: str, mascara: str) -> str:
+def _opcoes_posicao(c: str, tipo: str):
+    if tipo == "L":
+        if c.isalpha():
+            return [(c, 0)]
+        return [(x, 1) for x in CONFUSOES_LETRA.get(c, ())]
+
+    if c.isdigit():
+        return [(c, 0)]
+    return [(x, 1) for x in CONFUSOES_NUM.get(c, ())]
+
+
+def candidatos_por_mascara(texto: str, mascara: str, modelo: str):
+    texto = limpar(texto)
     if len(texto) != len(mascara):
-        return texto
+        return []
+
+    candidatos = [("", 0)]
+    for c, tipo in zip(texto, mascara):
+        opcoes = _opcoes_posicao(c, tipo)
+        if not opcoes:
+            return []
+
+        novos = []
+        for prefixo, custo in candidatos:
+            for caractere, incremento in opcoes:
+                novos.append((prefixo + caractere, custo + incremento))
+        candidatos = novos
 
     saida = []
-    for c, tipo in zip(texto, mascara):
-        if tipo == "L":
-            saida.append(CONFUSOES_LETRA.get(c, c))
-        else:
-            saida.append(CONFUSOES_NUM.get(c, c))
-    return "".join(saida)
+    for placa, custo in candidatos:
+        valida = (
+            modelo == "ANTIGA" and PADRAO_ANTIGO.fullmatch(placa)
+        ) or (
+            modelo == "MERCOSUL" and PADRAO_MERCOSUL.fullmatch(placa)
+        )
+        if valida:
+            saida.append({
+                "placa": placa,
+                "modelo": modelo,
+                "valida": True,
+                "correcoes": custo,
+            })
+    return saida
+
+
+def gerar_candidatos_validos(texto: str):
+    texto = limpar(texto)
+    if len(texto) != 7:
+        return []
+
+    candidatos = []
+    candidatos.extend(candidatos_por_mascara(texto, "LLLNNNN", "ANTIGA"))
+    candidatos.extend(candidatos_por_mascara(texto, "LLLNLNN", "MERCOSUL"))
+
+    # Primeiro: menos alterações. Em empate, o consenso entre preprocessamentos
+    # será aplicado em ocr_placa().
+    candidatos.sort(key=lambda x: x["correcoes"])
+    return candidatos
 
 
 def classificar_e_corrigir(texto: str):
     texto = limpar(texto)
-    candidatos = [
-        (corrigir_por_mascara(texto, "LLLNNNN"), "ANTIGA"),
-        (corrigir_por_mascara(texto, "LLLNLNN"), "MERCOSUL"),
-    ]
-
-    for placa, modelo in candidatos:
-        if modelo == "ANTIGA" and PADRAO_ANTIGO.fullmatch(placa):
-            return placa, modelo, True
-        if modelo == "MERCOSUL" and PADRAO_MERCOSUL.fullmatch(placa):
-            return placa, modelo, True
-
-    return texto, None, False
+    candidatos = gerar_candidatos_validos(texto)
+    if candidatos:
+        melhor = candidatos[0]
+        return melhor["placa"], melhor["modelo"], True, melhor["correcoes"]
+    return texto, None, False, 99
 
 
 def preprocessamentos(crop):
@@ -102,7 +156,6 @@ def ler_easyocr(img):
     if not resultados:
         return "", 0.0
 
-    # Caso o OCR divida a placa em mais de um bloco, junta da esquerda para a direita.
     resultados = sorted(
         resultados,
         key=lambda r: min(p[0] for p in r[0]),
@@ -122,35 +175,92 @@ def ler_easyocr(img):
 
 
 def ocr_placa(crop):
-    leituras = []
+    leituras_brutas = []
+    agregados = defaultdict(lambda: {
+        "suporte": 0,
+        "soma_conf": 0.0,
+        "melhor_conf": 0.0,
+        "menor_custo": 99,
+        "modelo": None,
+        "ocr_brutos": [],
+    })
 
     for img in preprocessamentos(crop):
         bruto, confianca = ler_easyocr(img)
-        placa, modelo, valida = classificar_e_corrigir(bruto)
-        leituras.append({
-            "placa": placa,
-            "modelo": modelo,
-            "valida": valida,
-            "ocr_bruto": bruto,
-            "confianca_ocr": round(confianca, 4),
-            "motor_ocr": "easyocr",
+        bruto = limpar(bruto)
+        leituras_brutas.append({
+            "texto": bruto,
+            "confianca": round(confianca, 4),
         })
 
-    leituras.sort(
-        key=lambda x: (
-            x["valida"],
-            len(x["placa"]) == 7,
-            x["confianca_ocr"],
-        ),
-        reverse=True,
-    )
+        for cand in gerar_candidatos_validos(bruto):
+            chave = cand["placa"]
+            agg = agregados[chave]
+            agg["suporte"] += 1
+            agg["soma_conf"] += confianca
+            agg["melhor_conf"] = max(agg["melhor_conf"], confianca)
+            agg["menor_custo"] = min(agg["menor_custo"], cand["correcoes"])
+            agg["modelo"] = cand["modelo"]
+            agg["ocr_brutos"].append(bruto)
 
-    return leituras[0] if leituras else {
+    if agregados:
+        ranking = []
+        for placa, agg in agregados.items():
+            media_conf = agg["soma_conf"] / max(agg["suporte"], 1)
+            ranking.append({
+                "placa": placa,
+                "modelo": agg["modelo"],
+                "valida": True,
+                "confianca_ocr": round(media_conf, 4),
+                "correcoes": agg["menor_custo"],
+                "suporte_ocr": agg["suporte"],
+                "melhor_confianca_ocr": round(agg["melhor_conf"], 4),
+                "ocr_bruto": max(
+                    agg["ocr_brutos"],
+                    key=lambda bruto: max(
+                        (x["confianca"] for x in leituras_brutas if x["texto"] == bruto),
+                        default=0,
+                    ),
+                ),
+                "leituras_ocr": leituras_brutas,
+                "motor_ocr": "easyocr",
+            })
+
+        ranking.sort(
+            key=lambda x: (
+                x["suporte_ocr"],
+                -x["correcoes"],
+                x["confianca_ocr"],
+                x["melhor_confianca_ocr"],
+            ),
+            reverse=True,
+        )
+        return ranking[0]
+
+    # Se nenhuma máscara brasileira for validada, devolve a melhor leitura bruta.
+    if leituras_brutas:
+        melhor = max(leituras_brutas, key=lambda x: x["confianca"])
+        return {
+            "placa": melhor["texto"],
+            "modelo": None,
+            "valida": False,
+            "ocr_bruto": melhor["texto"],
+            "confianca_ocr": melhor["confianca"],
+            "correcoes": 99,
+            "suporte_ocr": 0,
+            "leituras_ocr": leituras_brutas,
+            "motor_ocr": "easyocr",
+        }
+
+    return {
         "placa": "",
         "modelo": None,
         "valida": False,
         "ocr_bruto": "",
         "confianca_ocr": 0.0,
+        "correcoes": 99,
+        "suporte_ocr": 0,
+        "leituras_ocr": [],
         "motor_ocr": "easyocr",
     }
 
@@ -203,6 +313,8 @@ def detectar(caminho_imagem, modelo_yolo=MODELO_PADRAO, conf=0.25, salvar_recort
     saida.sort(
         key=lambda x: (
             x["valida"],
+            x.get("suporte_ocr", 0),
+            -x.get("correcoes", 99),
             x["confianca_yolo"],
             x["confianca_ocr"],
         ),
