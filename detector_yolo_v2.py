@@ -17,6 +17,23 @@ def _crop_central(crop):
     return crop[y1:y2, x1:x2]
 
 
+def _crop_sem_faixa_superior(crop):
+    """Recorta a faixa superior da placa Mercosul para evitar BRASIL no OCR.
+
+    A variante e apenas adicional: as leituras do crop original continuam sendo
+    avaliadas, entao placas antigas ou deteccoes muito apertadas nao dependem
+    deste recorte.
+    """
+    if crop is None or crop.size == 0:
+        return crop
+    h, w = crop.shape[:2]
+    x1 = int(w * 0.03)
+    x2 = max(x1 + 1, int(w * 0.97))
+    y1 = int(h * 0.24)
+    y2 = max(y1 + 1, int(h * 0.97))
+    return crop[y1:y2, x1:x2]
+
+
 def _crop_nitido(crop):
     maior = cv2.resize(crop, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
     blur = cv2.GaussianBlur(maior, (0, 0), 1.2)
@@ -96,6 +113,16 @@ def _corrigir_perspectiva(crop):
     return candidatos[0][1]
 
 
+def _tem_texto_faixa(item):
+    bruto = str(item.get("ocr_bruto", "") or "").upper()
+    leituras = item.get("leituras_ocr", []) or []
+    textos = [bruto]
+    for leitura in leituras:
+        if isinstance(leitura, dict):
+            textos.append(str(leitura.get("texto", "") or "").upper())
+    return any("BRASIL" in texto for texto in textos)
+
+
 def _score_ocr(item):
     valida = 1 if item.get("valida", False) else 0
     correcoes = float(item.get("correcoes", 99.0))
@@ -109,21 +136,36 @@ def _score_ocr(item):
         + melhor_conf * 8.0
         + suporte * 2.0
     )
-    if str(item.get("variante_crop", "")).startswith("perspectiva"):
+
+    variante = str(item.get("variante_crop", ""))
+    if variante.startswith("perspectiva"):
         score -= 1.0
+    if variante.startswith("sem_faixa"):
+        score += 2.5
+
+    # A palavra BRASIL da faixa azul nao pode virar candidata de placa.
+    # Em vez de alterar o OCR-base de forma agressiva, derrubamos fortemente
+    # o ranking desta leitura e deixamos variantes sem a faixa competirem.
+    if _tem_texto_faixa(item):
+        score -= 55.0
+
     return score
 
 
 def ocr_placa_v2(crop):
     central = _crop_central(crop)
+    sem_faixa = _crop_sem_faixa_superior(crop)
     perspectiva = _corrigir_perspectiva(crop)
     perspectiva_central = _corrigir_perspectiva(central)
+    perspectiva_sem_faixa = _corrigir_perspectiva(sem_faixa)
 
     variantes = [
         ("original", crop),
         ("central", central),
         ("nitido", _crop_nitido(crop)),
         ("central_nitido", _crop_nitido(central)),
+        ("sem_faixa", sem_faixa),
+        ("sem_faixa_nitido", _crop_nitido(sem_faixa)),
     ]
     if perspectiva is not None:
         variantes.extend([
@@ -135,6 +177,11 @@ def ocr_placa_v2(crop):
             ("perspectiva_central", perspectiva_central),
             ("perspectiva_central_nitida", _crop_nitido(perspectiva_central)),
         ])
+    if perspectiva_sem_faixa is not None:
+        variantes.extend([
+            ("sem_faixa_perspectiva", perspectiva_sem_faixa),
+            ("sem_faixa_perspectiva_nitida", _crop_nitido(perspectiva_sem_faixa)),
+        ])
 
     candidatos = []
     for nome, imagem in variantes:
@@ -142,6 +189,7 @@ def ocr_placa_v2(crop):
             continue
         item = dict(_OCR_BASE(imagem))
         item["variante_crop"] = nome
+        item["contaminado_faixa"] = _tem_texto_faixa(item)
         item["score_ocr_v2"] = round(_score_ocr(item), 4)
         candidatos.append(item)
 
@@ -158,6 +206,7 @@ def ocr_placa_v2(crop):
             "confianca_ocr": c.get("confianca_ocr"),
             "correcoes": c.get("correcoes"),
             "suporte_ocr": c.get("suporte_ocr"),
+            "contaminado_faixa": c.get("contaminado_faixa", False),
             "score": c.get("score_ocr_v2"),
         }
         for c in candidatos
@@ -217,8 +266,6 @@ def _criar_fusoes(caminho_imagem, resultados, salvar_recortes=False):
         x2 = max(i["bbox"][2] for i in itens)
         y2 = max(i["bbox"][3] for i in itens)
 
-        # A fusao recupera partes da placa que deteccoes individuais podem cortar.
-        # Pequeno padding ajuda especialmente em imagens inclinadas.
         bw, bh = x2 - x1, y2 - y1
         px, py = int(bw * 0.04), int(bh * 0.06)
         fx1, fy1 = max(0, x1 - px), max(0, y1 - py)
@@ -255,8 +302,6 @@ def _bonus_geometria(item):
     bw = max(1, x2 - x1)
     bh = max(1, y2 - y1)
     proporcao = bw / bh
-    # Placas vistas em perspectiva variam bastante; bonus suave para evitar
-    # que a geometria sobreponha uma leitura OCR claramente melhor.
     distancia = abs(proporcao - 2.8)
     return max(-3.0, 3.0 - distancia * 1.5)
 
@@ -268,6 +313,8 @@ def _score_deteccao(item):
     conf_yolo = float(item.get("confianca_yolo", 0.0))
     suporte = min(int(item.get("suporte_ocr", 0)), 5)
     fusao = 1 if item.get("tipo_deteccao") == "fusao_sobrepostas" else 0
+    contaminado = 1 if _tem_texto_faixa(item) else 0
+
     return (
         valida * 100.0
         - correcoes * 8.0
@@ -275,7 +322,8 @@ def _score_deteccao(item):
         + conf_yolo * 24.0
         + suporte * 1.5
         + _bonus_geometria(item)
-        + fusao * 1.5
+        - fusao * 2.0
+        - contaminado * 40.0
     )
 
 
@@ -292,9 +340,6 @@ def detectar(caminho_imagem, modelo_yolo=base.MODELO_PADRAO, conf=0.25, salvar_r
     finally:
         base.ocr_placa = original
 
-    # Nova rodada: se o YOLO gerar varias caixas sobre a mesma placa, criamos
-    # tambem um recorte unificado e o submetemos ao OCR. Isso evita escolher
-    # entre caixas que capturaram somente partes diferentes da mesma placa.
     resultados.extend(_criar_fusoes(caminho_imagem, resultados, salvar_recortes))
 
     for item in resultados:
