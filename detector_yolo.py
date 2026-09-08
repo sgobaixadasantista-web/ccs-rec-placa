@@ -16,27 +16,29 @@ PADRAO_ANTIGO = re.compile(r"^[A-Z]{3}[0-9]{4}$")
 PADRAO_MERCOSUL = re.compile(r"^[A-Z]{3}[0-9][A-Z][0-9]{2}$")
 ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-# Cada item pode ter mais de uma alternativa plausível. O desempate final usa
-# custo de correção + consenso entre os vários preprocessamentos do OCR.
+# Alternativas plausiveis do OCR com custo relativo de correcao.
+# Quanto menor o custo, mais provavel a substituicao.
+# Em placas, o EasyOCR confunde com frequencia o algarismo 7 com a letra Z;
+# por isso Z->7 recebe custo menor que Z->2 em posicoes numericas.
 CONFUSOES_NUM = {
-    "O": ("0",),
-    "Q": ("0",),
-    "D": ("0",),
-    "I": ("1",),
-    "L": ("1",),
-    "Z": ("2", "7"),
-    "S": ("5",),
-    "B": ("8",),
-    "G": ("6",),
+    "O": (("0", 1.0),),
+    "Q": (("0", 1.0),),
+    "D": (("0", 1.0),),
+    "I": (("1", 1.0),),
+    "L": (("1", 1.0),),
+    "Z": (("7", 0.7), ("2", 1.0)),
+    "S": (("5", 1.0),),
+    "B": (("8", 1.0),),
+    "G": (("6", 1.0),),
 }
 
 CONFUSOES_LETRA = {
-    "0": ("O",),
-    "1": ("I",),
-    "2": ("Z",),
-    "5": ("S",),
-    "8": ("B",),
-    "6": ("G",),
+    "0": (("O", 1.0),),
+    "1": (("I", 1.0),),
+    "2": (("Z", 1.0),),
+    "5": (("S", 1.0),),
+    "8": (("B", 1.0),),
+    "6": (("G", 1.0),),
 }
 
 _READER = None
@@ -56,12 +58,12 @@ def limpar(texto: str) -> str:
 def _opcoes_posicao(c: str, tipo: str):
     if tipo == "L":
         if c.isalpha():
-            return [(c, 0)]
-        return [(x, 1) for x in CONFUSOES_LETRA.get(c, ())]
+            return [(c, 0.0)]
+        return list(CONFUSOES_LETRA.get(c, ()))
 
     if c.isdigit():
-        return [(c, 0)]
-    return [(x, 1) for x in CONFUSOES_NUM.get(c, ())]
+        return [(c, 0.0)]
+    return list(CONFUSOES_NUM.get(c, ()))
 
 
 def candidatos_por_mascara(texto: str, mascara: str, modelo: str):
@@ -69,7 +71,7 @@ def candidatos_por_mascara(texto: str, mascara: str, modelo: str):
     if len(texto) != len(mascara):
         return []
 
-    candidatos = [("", 0)]
+    candidatos = [("", 0.0)]
     for c, tipo in zip(texto, mascara):
         opcoes = _opcoes_posicao(c, tipo)
         if not opcoes:
@@ -93,7 +95,7 @@ def candidatos_por_mascara(texto: str, mascara: str, modelo: str):
                 "placa": placa,
                 "modelo": modelo,
                 "valida": True,
-                "correcoes": custo,
+                "correcoes": round(custo, 3),
             })
     return saida
 
@@ -107,8 +109,8 @@ def gerar_candidatos_validos(texto: str):
     candidatos.extend(candidatos_por_mascara(texto, "LLLNNNN", "ANTIGA"))
     candidatos.extend(candidatos_por_mascara(texto, "LLLNLNN", "MERCOSUL"))
 
-    # Primeiro: menos alterações. Em empate, o consenso entre preprocessamentos
-    # será aplicado em ocr_placa().
+    # Primeiro: menor custo de correcao. Em empate, o consenso entre os varios
+    # preprocessamentos sera aplicado em ocr_placa().
     candidatos.sort(key=lambda x: x["correcoes"])
     return candidatos
 
@@ -119,7 +121,7 @@ def classificar_e_corrigir(texto: str):
     if candidatos:
         melhor = candidatos[0]
         return melhor["placa"], melhor["modelo"], True, melhor["correcoes"]
-    return texto, None, False, 99
+    return texto, None, False, 99.0
 
 
 def preprocessamentos(crop):
@@ -180,7 +182,7 @@ def ocr_placa(crop):
         "suporte": 0,
         "soma_conf": 0.0,
         "melhor_conf": 0.0,
-        "menor_custo": 99,
+        "menor_custo": 99.0,
         "modelo": None,
         "ocr_brutos": [],
     })
@@ -212,7 +214,7 @@ def ocr_placa(crop):
                 "modelo": agg["modelo"],
                 "valida": True,
                 "confianca_ocr": round(media_conf, 4),
-                "correcoes": agg["menor_custo"],
+                "correcoes": round(agg["menor_custo"], 3),
                 "suporte_ocr": agg["suporte"],
                 "melhor_confianca_ocr": round(agg["melhor_conf"], 4),
                 "ocr_bruto": max(
@@ -237,7 +239,7 @@ def ocr_placa(crop):
         )
         return ranking[0]
 
-    # Se nenhuma máscara brasileira for validada, devolve a melhor leitura bruta.
+    # Se nenhuma mascara brasileira for validada, devolve a melhor leitura bruta.
     if leituras_brutas:
         melhor = max(leituras_brutas, key=lambda x: x["confianca"])
         return {
@@ -246,7 +248,7 @@ def ocr_placa(crop):
             "valida": False,
             "ocr_bruto": melhor["texto"],
             "confianca_ocr": melhor["confianca"],
-            "correcoes": 99,
+            "correcoes": 99.0,
             "suporte_ocr": 0,
             "leituras_ocr": leituras_brutas,
             "motor_ocr": "easyocr",
@@ -258,7 +260,7 @@ def ocr_placa(crop):
         "valida": False,
         "ocr_bruto": "",
         "confianca_ocr": 0.0,
-        "correcoes": 99,
+        "correcoes": 99.0,
         "suporte_ocr": 0,
         "leituras_ocr": [],
         "motor_ocr": "easyocr",
@@ -268,7 +270,7 @@ def ocr_placa(crop):
 def detectar(caminho_imagem, modelo_yolo=MODELO_PADRAO, conf=0.25, salvar_recortes=False):
     imagem = cv2.imread(caminho_imagem)
     if imagem is None:
-        raise ValueError(f"Imagem não encontrada: {caminho_imagem}")
+        raise ValueError(f"Imagem nao encontrada: {caminho_imagem}")
 
     modelo = YOLO(modelo_yolo)
     resultados = modelo.predict(source=imagem, conf=conf, verbose=False)
@@ -314,7 +316,7 @@ def detectar(caminho_imagem, modelo_yolo=MODELO_PADRAO, conf=0.25, salvar_recort
         key=lambda x: (
             x["valida"],
             x.get("suporte_ocr", 0),
-            -x.get("correcoes", 99),
+            -x.get("correcoes", 99.0),
             x["confianca_yolo"],
             x["confianca_ocr"],
         ),
@@ -325,7 +327,7 @@ def detectar(caminho_imagem, modelo_yolo=MODELO_PADRAO, conf=0.25, salvar_recort
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Detecção de placas brasileiras com YOLOv11 + EasyOCR"
+        description="Deteccao de placas brasileiras com YOLOv11 + EasyOCR"
     )
     parser.add_argument("imagem", help="Caminho da imagem")
     parser.add_argument(
